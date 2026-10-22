@@ -49,3 +49,6 @@ button.primary { color: #17151a; background: #d4c19a; border-color: #d4c19a; }
   .volume span { display: none; }
   .volume input { width: 46px; }
 }
+
+#trackingStatus { position: absolute; top: max(12px, env(safe-area-inset-top)); left: 16px; right: 16px; margin: 0; z-index: 2; color: #e8e1d5; font-size: 12px; pointer-events: none; text-shadow: 0 1px 5px #000; }
+button:disabled { opacity: .65; cursor: wait; }

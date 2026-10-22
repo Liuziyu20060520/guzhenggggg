@@ -10,7 +10,8 @@
 <body>
   <main id="app" aria-label="星空古筝互动演奏">
     <canvas id="scene" aria-label="古筝琴弦与指尖提示点"></canvas>
-    <video id="camera" playsinline muted></video>
+    <video id="camera" autoplay playsinline muted></video>
+    <p id="trackingStatus" role="status" aria-live="polite">开启摄像头后，用食指指尖的光圈碰触红点</p>
     <div class="controls" aria-label="演奏控制">
       <button id="cameraBtn" class="primary" type="button">开启摄像头</button>
       <button id="playBtn" type="button">自动演示</button>
@@ -18,8 +19,7 @@
       <label class="volume" for="volume"><span>音量</span><input id="volume" type="range" min="0" max="100" value="68" /></label>
     </div>
   </main>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
   <script src="app.js"></script>
 </body>
 </html>

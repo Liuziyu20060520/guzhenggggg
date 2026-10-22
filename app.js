@@ -11,9 +11,12 @@
 
   let W = 0, H = 0, DPR = 1;
   let stars = [], ripples = [], glints = [];
-  let audioCtx = null, masterGain = null, hands = null, camera = null;
+  let audioCtx = null, masterGain = null, hands = null, frameId = null;
   let cameraOn = false, demoTimer = null, lastFingerPoints = [];
-  let lastTrigger = { left: 0, right: 0 };
+  let lastTrigger = { left: -Infinity, right: -Infinity };
+  let cameraStarting = false, lastVideoTime = -1, cameraGeneration = 0;
+  const status = document.getElementById("trackingStatus");
+  const HANDS_BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/";
   let pointer = null, stepIndex = 0, nowTime = 0;
   const STRING_COUNT = 21;
   const stringState = [];
@@ -132,7 +135,7 @@
     s.pluck = 1;
     s.energy = velocity;
     const step = currentStep();
-    const target = step?.[side];
+    const target = step?.[side === 'left' ? 'l' : 'r'];
     const x = target ? target[1] * W : (side === 'left' ? W * .28 : W * .72);
     addWaterRipple(x, s.y, velocity, index, side);
   }
@@ -336,6 +339,11 @@
     ripples = ripples.filter(w => w.age < w.duration);
     drawGlints(dt);
     activeTargets().forEach(t => drawTarget(t, time));
+    for (const p of lastFingerPoints) {
+      ctx.beginPath(); ctx.arc(p.x, p.y, 12, 0, Math.PI * 2);
+      ctx.strokeStyle = "#9cfff0"; ctx.lineWidth = 2; ctx.stroke();
+      ctx.fillStyle = "#e0fff5"; ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill();
+    }
 
     requestAnimationFrame(draw);
   }
@@ -356,16 +364,19 @@
   function tryHit(x, y, preferredSide = null, fromCamera = false) {
     const step = currentStep();
     if (!step) return false;
-    const side = preferredSide || (x < W / 2 ? 'left' : 'right');
+    // Targets are spatial lanes, not anatomical hands. Either hand can play either lane.
+    const nearest = fromCamera ? activeTargets().sort((a, b) =>
+      Math.hypot(x-a.x, y-a.y) - Math.hypot(x-b.x, y-b.y))[0] : null;
+    const side = nearest?.side || preferredSide || (x < W / 2 ? 'left' : 'right');
     const now = performance.now();
-    if (now - lastTrigger[side] < (fromCamera ? 390 : 230)) return false;
+    if (now - lastTrigger[side] < (fromCamera ? 180 : 100)) return false;
     const key = side === 'left' ? 'l' : 'r';
     const hitKey = side === 'left' ? 'hitL' : 'hitR';
     const note = step[key];
     if (!note || step[hitKey]) return false;
     const targetX = note[1] * W;
     const targetY = strings[note[0]].y;
-    const radius = fromCamera ? Math.max(38, Math.min(W, H) * .052) : Math.max(34, Math.min(W, H) * .045);
+    const radius = fromCamera ? Math.min(64, Math.max(28, Math.min(W, H) * .055)) : Math.max(34, Math.min(W, H) * .045);
     if (Math.hypot(x - targetX, y - targetY) > radius) return false;
 
     lastTrigger[side] = now;
@@ -386,49 +397,103 @@
     tryHit(e.clientX, e.clientY, e.clientX < W / 2 ? 'left' : 'right');
   });
 
-  async function startCamera() {
+  function onHandResults(results) {
+    if (!cameraOn) return;
+    const targets = activeTargets(); // One score step per camera frame.
+    const points = (results.multiHandLandmarks || []).flatMap((landmarks, i) => {
+      const tip = landmarks[8];
+      if (!tip || !Number.isFinite(tip.x) || !Number.isFinite(tip.y)) return [];
+      // Raw input is unmirrored: mirror x once for the displayed cursor.
+      // MediaPipe labels assume mirrored input, so swap labels for diagnostics only.
+      const label = results.multiHandedness?.[i]?.label;
+      return [{ x: (1-tip.x)*W, y: tip.y*H,
+        hand: label === 'Left' ? '右手' : label === 'Right' ? '左手' : '手' }];
+    });
+    lastFingerPoints = points;
+    const frameStep = stepIndex;
+    for (const p of points) {
+      if (stepIndex !== frameStep) break;
+      if (targets.length) tryHit(p.x, p.y, null, true);
+    }
+    status.textContent = stepIndex >= score.length ? '演奏完成，点击重新开始' :
+      points.length ? '已识别 ' + points.map(p => p.hand).join('、') + ' · 用食指光圈碰触红点' :
+      '摄像头已开启 · 请让手掌和食指完整进入画面';
+  }
+
+  async function processFrame(generation) {
+    if (!cameraOn || generation !== cameraGeneration) return;
     try {
-      if (!navigator.mediaDevices?.getUserMedia) throw new Error('当前浏览器无法访问摄像头，请使用 localhost 或 HTTPS 打开');
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 960 }, height: { ideal: 720 } }, audio: false
-      });
-      video.srcObject = stream;
-      await video.play();
-      if (!window.Hands || !window.Camera) throw new Error('手部追踪组件没有加载成功，请检查网络后刷新页面');
-      hands = new Hands({ locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
-      hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: .62, minTrackingConfidence: .58 });
-      hands.onResults(results => {
-        const points = [];
-        const landmarks = results.multiHandLandmarks || [];
-        for (let i = 0; i < landmarks.length; i++) {
-          const tip = landmarks[i][8];
-          // Mirror horizontal movement so it feels like looking into a mirror.
-          const p = { x: (1 - tip.x) * W, y: tip.y * H };
-          points.push(p);
-          const side = p.x < W / 2 ? 'left' : 'right';
-          tryHit(p.x, p.y, side, true);
-        }
-        lastFingerPoints = points;
-      });
-      camera = new Camera(video, { onFrame: async () => { if (hands) await hands.send({ image: video }); }, width: 960, height: 720 });
-      camera.start();
-      cameraOn = true;
-      cameraBtn.textContent = '关闭摄像头';
+      if (video.readyState >= 2 && video.videoWidth > 0 && video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+        await hands.send({ image: video }); // Await each inference; never overlap frames.
+      }
+      if (cameraOn && generation === cameraGeneration)
+        frameId = requestAnimationFrame(() => processFrame(generation));
     } catch (err) {
-      console.error(err);
-      cameraBtn.textContent = '开启摄像头';
-      alert(err?.message || '无法启动摄像头，请检查摄像头权限。');
+      if (generation !== cameraGeneration) return;
+      await stopCamera();
+      status.textContent = '手部追踪中断：' + (err.message || '请检查网络后重试');
     }
   }
 
-  function stopCamera() {
-    if (camera?.stop) camera.stop();
-    if (video.srcObject) video.srcObject.getTracks().forEach(track => track.stop());
-    cameraOn = false; lastFingerPoints = [];
-    cameraBtn.textContent = '开启摄像头';
+  async function startCamera() {
+    if (cameraStarting || cameraOn) return;
+    cameraStarting = true;
+    cameraBtn.disabled = true;
+    status.textContent = '正在加载手部模型并启动摄像头…';
+    try {
+      ensureAudio(); // Unlock sound in the click gesture, before any await.
+      if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia)
+        throw new Error('请通过 HTTPS 或 localhost 打开网页后使用摄像头');
+      if (!window.Hands) throw new Error('MediaPipe 加载失败，请检查网络后刷新页面');
+      hands = new window.Hands({ locateFile: file => HANDS_BASE + file });
+      hands.setOptions({ selfieMode: false, maxNumHands: 2, modelComplexity: 1,
+        minDetectionConfidence: .5, minTrackingConfidence: .5 });
+      hands.onResults(onHandResults);
+      await hands.initialize();
+      video.srcObject = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 960 }, height: { ideal: 720 } }, audio: false
+      });
+      await video.play();
+      video.srcObject.getVideoTracks().forEach(track => track.addEventListener('ended', () => {
+        if (cameraOn) { void stopCamera(); status.textContent = '摄像头已断开，请重新开启'; }
+      }));
+      cameraOn = true;
+      lastVideoTime = -1;
+      cameraBtn.textContent = '关闭摄像头';
+      status.textContent = '摄像头已开启 · 请伸出食指';
+      void processFrame(++cameraGeneration);
+    } catch (err) {
+      console.error(err);
+      await stopCamera();
+      status.textContent = '启动失败：' + (err.name === 'NotAllowedError' ? '请允许摄像头权限后重试' : err.message || '请检查摄像头和网络');
+    } finally {
+      cameraStarting = false;
+      cameraBtn.disabled = false;
+    }
   }
 
-  cameraBtn.addEventListener('click', () => cameraOn ? stopCamera() : startCamera());
+  async function stopCamera() {
+    cameraOn = false;
+    ++cameraGeneration;
+    cancelAnimationFrame(frameId);
+    if (video.srcObject) video.srcObject.getTracks().forEach(track => track.stop());
+    video.srcObject = null;
+    const oldHands = hands;
+    hands = null;
+    lastFingerPoints = [];
+    cameraBtn.textContent = '开启摄像头';
+    status.textContent = '摄像头已关闭';
+    try { await oldHands?.close(); } catch (err) { console.warn(err); }
+  }
+
+  cameraBtn.addEventListener('click', async () => {
+    if (cameraStarting || cameraBtn.disabled) return;
+    cameraBtn.disabled = true;
+    try { if (cameraOn) await stopCamera(); else await startCamera(); }
+    finally { cameraBtn.disabled = false; }
+  });
+  window.addEventListener('pagehide', () => { void stopCamera(); });
 
   playBtn.addEventListener('click', () => {
     ensureAudio();
@@ -461,7 +526,7 @@
     stepIndex = 0;
     score.forEach(step => { delete step.hitL; delete step.hitR; });
     ripples = []; glints = [];
-    lastTrigger = { left: 0, right: 0 };
+    lastTrigger = { left: -Infinity, right: -Infinity };
     strings.forEach(s => { s.pluck = 0; s.energy = 0; });
     playBtn.textContent = '自动演示';
   }
